@@ -35,9 +35,25 @@ import sys
 # the port's generated code inside the translator's own repo and report that it
 # held no emitted modules, which is a true statement about the wrong directory.
 TOOL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROOT = os.getcwd()
 RECOMP = os.path.join(TOOL_ROOT, "tools", "recomp.py")
-GEN = os.path.join(ROOT, "src", "recomp")
+
+
+def project_root(argv):
+    """The PORT being checked -- told, not guessed.
+
+    Both guesses are wrong somewhere. Resolving from __file__ points at this
+    translator's own repo, which holds no emitted modules, so the check reports
+    "nothing to check" and passes having looked at nothing. Resolving from the
+    working directory is right when a human runs it from the port and wrong
+    when the build system runs it from the build directory, which is where it
+    actually matters. So callers pass --root, and CMake passes its source dir.
+    """
+    for i, a in enumerate(argv):
+        if a == "--root":
+            return os.path.abspath(argv[i + 1])
+        if a.startswith("--root="):
+            return os.path.abspath(a.split("=", 1)[1])
+    return os.getcwd()
 STAMP = re.compile(r"/\* recomp-fingerprint: ([0-9a-f]+) \*/")
 
 
@@ -59,10 +75,10 @@ def stamp_of(path):
     return None
 
 
-def modules():
-    """-> {module: [(path, stamp)]}, over the emitted chunks only."""
+def modules(gen):
+    """-> {module: [(path, stamp)]}, over the emitted chunks in `gen`."""
     out = {}
-    for p in sorted(glob.glob(os.path.join(GEN, "*.c"))):
+    for p in sorted(glob.glob(os.path.join(gen, "*.c"))):
         b = os.path.basename(p)
         m = re.match(r"(.+?)_(\d{3}|native)\.c$", b)
         if not m:
@@ -72,12 +88,14 @@ def modules():
 
 
 def main(argv):
+    GEN = os.path.join(project_root(argv), "src", "recomp")
     want = fingerprint()
-    mods = modules()
+    mods = modules(GEN)
     if not mods:
         sys.stderr.write(
             "check_emitted: %s holds NO emitted modules. Nothing was checked --\n"
-            "  that is not a pass. Generate them (see CLAUDE.md) before building.\n"
+            "  that is not a pass -- pass --root <port> if this is the wrong tree.\n"
+            "  Generate them (see the port's AGENTS.md) before building.\n"
             % GEN)
         return 2
 
