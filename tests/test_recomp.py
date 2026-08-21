@@ -51,6 +51,28 @@ def translate(instructions, ep=None, extra_eps=()):
     return "\n".join(body)
 
 
+class HybridBackingImage(unittest.TestCase):
+    """A hybrid DLL must rebase against its own renamed retail image."""
+
+    def test_forward_module_owns_generated_image_base(self):
+        body = recomp.dll_body("libCriMovie.dll", "libCriMovie_orig")
+        self.assertIn('GetModuleHandleA("libCriMovie_orig.dll")', body)
+        self.assertIn('LoadLibraryA("libCriMovie_orig.dll")', body)
+        self.assertNotIn("libIGDisplay_orig", body)
+
+    def test_default_is_derived_from_the_program(self):
+        self.assertEqual(
+            recomp.dll_backing_module("libIGMath.dll", None),
+            "libIGMath_orig.dll",
+        )
+
+    def test_explicit_extension_is_not_duplicated(self):
+        self.assertEqual(
+            recomp.dll_backing_module("libIGMath.dll", "retail.dll"),
+            "retail.dll",
+        )
+
+
 class SwitchDispatch(unittest.TestCase):
     """The MSVC switch: `JMP dword ptr [reg*4 + <table>]`.
 

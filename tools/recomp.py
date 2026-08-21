@@ -2812,7 +2812,7 @@ def cmd_dll(argv):
         L.append('  "%s",' % sym.replace('"', "'"))
     L.append("};")
     L.append("#define N_IMP %d" % len(names))
-    L.append(DLL_BODY)
+    L.append(dll_body(d["program"], fwd))
     L.append(host_call_bridge(False))
     for mod, sym, ident in names:
         L.append("void %s(CPU *C) { x86_call_host(C, g_imp[%d], \"%s!%s\"); }"
@@ -2872,6 +2872,27 @@ def cmd_dll(argv):
               "reject it if anything imports them" % len(missing))
 
 
+def dll_backing_module(program, forward_module):
+    """Return the renamed retail DLL that owns generated absolute addresses."""
+    name = forward_module
+    if not name:
+        name = os.path.splitext(program)[0] + "_orig"
+    if not name.lower().endswith(".dll"):
+        name += ".dll"
+    return name
+
+
+def dll_body(program, forward_module):
+    """Specialize the hybrid loader for the module being recompiled.
+
+    Every Alchemy DLL uses the same preferred address, so using another DLL's
+    backing image produces plausible but unrelated addresses at the same RVA.
+    """
+    backing = dll_backing_module(program, forward_module)
+    c_backing = backing.replace("\\", "\\\\").replace('"', '\\"')
+    return DLL_BODY.replace("@BACKING_DLL@", c_backing)
+
+
 DLL_BODY = '''
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
 {
@@ -2892,9 +2913,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
     }
     {   /* absolute references into the original image are relative to wherever
            the loader actually put it -- inside the game it is relocated */
-        HMODULE o = GetModuleHandleA("libIGDisplay_orig.dll");
-        if (!o) o = LoadLibraryA("libIGDisplay_orig.dll");
-        if (!o) { fprintf(stderr, "recomp: libIGDisplay_orig.dll absent\\n");
+        HMODULE o = GetModuleHandleA("@BACKING_DLL@");
+        if (!o) o = LoadLibraryA("@BACKING_DLL@");
+        if (!o) { fprintf(stderr, "recomp: @BACKING_DLL@ absent\\n");
                   return FALSE; }
         g_imgbase = (uint32_t)(uintptr_t)o;
     }
