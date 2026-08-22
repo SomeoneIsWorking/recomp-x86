@@ -18,16 +18,18 @@ that was already correct -- the defect was in a build artifact nobody had
 regenerated. It came right the moment the module was re-emitted for an
 unrelated reason, which is the worst way to learn any of this.
 
-The stamp is a CONTENT hash of recomp.py, not a git hash: an uncommitted edit
-changes what it emits just as much as a commit does. A file with no stamp at
-all was emitted before stamping existed and is therefore stale by definition --
-it is reported as stale, never skipped.
+The stamp is a CONTENT hash of recomp.py, the override-routing scanner and the
+generated module's scanned native-override registration set, not a git hash:
+any uncommitted input changes what it emits just as much as a commit does. A
+file with no stamp at all was emitted before stamping existed and is therefore
+stale by definition -- it is reported as stale, never skipped.
 """
 import glob
-import hashlib
 import os
 import re
 import sys
+
+from recomp_overrides import emitted_fingerprint
 
 # TWO roots, and they are not the same one. The translator is SHARED -- it
 # lives in `recomp-x86` and serves every x86 port -- while the emitted C being
@@ -57,9 +59,8 @@ def project_root(argv):
 STAMP = re.compile(r"/\* recomp-fingerprint: ([0-9a-f]+) \*/")
 
 
-def fingerprint(path=RECOMP):
-    with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()[:16]
+def fingerprint(path=RECOMP, root=None, program="Game"):
+    return emitted_fingerprint(path, root or os.getcwd(), program)
 
 
 def stamp_of(path):
@@ -88,8 +89,8 @@ def modules(gen):
 
 
 def main(argv):
-    GEN = os.path.join(project_root(argv), "src", "recomp")
-    want = fingerprint()
+    root = project_root(argv)
+    GEN = os.path.join(root, "src", "recomp")
     mods = modules(GEN)
     if not mods:
         sys.stderr.write(
@@ -101,35 +102,38 @@ def main(argv):
 
     stale, ok = [], []
     for mod in sorted(mods):
+        want = fingerprint(root=root, program=mod)
         got = set(s for _, s in mods[mod])
         if got == {want}:
             ok.append(mod)
         else:
-            stale.append((mod, got))
+            stale.append((mod, got, want))
 
     if "--list" in argv or stale:
         for mod in sorted(mods):
+            want = fingerprint(root=root, program=mod)
             got = set(s for _, s in mods[mod])
             mark = "current" if got == {want} else "STALE"
             shown = ", ".join(sorted(g or "(unstamped)" for g in got))
-            print("  %-14s %-8s %d chunk(s)  %s" % (mod, mark, len(mods[mod]),
-                                                    shown))
+            print("  %-14s %-8s %d chunk(s)  got %s, want %s"
+                  % (mod, mark, len(mods[mod]), shown, want))
     if "--list" in argv:
-        print("translator fingerprint now: %s" % want)
+        print("fingerprints include the translator plus each module's "
+              "authoritative native-override set")
         return 0
 
     if not stale:
         print("check_emitted: %d module(s), all emitted by the current "
-              "translator (%s)" % (len(ok), want))
+              "translator and per-module native-override set" % len(ok))
         return 0
 
     sys.stderr.write(
         "\ncheck_emitted: %d of %d module(s) were emitted by a DIFFERENT "
-        "tools/recomp.py\n  than the one in the tree (now %s).\n\n"
+        "tools/recomp.py or native-override set.\n\n"
         "  These build and run and are wrong in whatever way the translator "
         "fixes they\n  missed were about to correct. Re-emit them:\n\n"
-        % (len(stale), len(mods), want))
-    for mod, _ in stale:
+        % (len(stale), len(mods)))
+    for mod, _, _ in stale:
         sys.stderr.write(
             "    python3 tools/recomp.py emit scratch/recomp/%s.json "
             "src/recomp/%s.c --split 1500 \\\n"
@@ -145,11 +149,15 @@ def selftest():
     import tempfile
     ok = True
     d = tempfile.mkdtemp(dir=os.path.join(TOOL_ROOT, "scratch"))
+    root = os.path.join(d, "port")
+    os.makedirs(os.path.join(root, "src", "native"))
+    with open(os.path.join(root, "src", "native", "base.c"), "w") as f:
+        f.write('x86_register_override("Game.exe", 0x00401000, f);\n')
     good = os.path.join(d, "m_000.c")
     with open(good, "w") as f:
         f.write("/* generated */\n/* recomp-fingerprint: %s */\nint x;\n"
-                % fingerprint())
-    if stamp_of(good) != fingerprint():
+                % fingerprint(root=root, program="Game.exe"))
+    if stamp_of(good) != fingerprint(root=root, program="Game.exe"):
         ok = False
         print("  FAIL  a current stamp was not read back")
     else:
@@ -158,7 +166,7 @@ def selftest():
     bad = os.path.join(d, "n_000.c")
     with open(bad, "w") as f:
         f.write("/* generated */\n/* recomp-fingerprint: deadbeefdeadbeef */\n")
-    if stamp_of(bad) == fingerprint():
+    if stamp_of(bad) == fingerprint(root=root, program="Game.exe"):
         ok = False
         print("  FAIL  a stale stamp read as current")
     else:
@@ -180,15 +188,55 @@ def selftest():
         body = f.read()
     with open(tweaked, "wb") as f:
         f.write(body + b"\n# a change\n")
-    if fingerprint(tweaked) == fingerprint():
+    if fingerprint(tweaked, root, "Game.exe") == fingerprint(
+            root=root, program="Game.exe"):
         ok = False
         print("  FAIL  editing the translator did not change the fingerprint")
     else:
         print("  pass  editing the translator changes the fingerprint")
 
-    for f in os.listdir(d):
-        os.unlink(os.path.join(d, f))
-    os.rmdir(d)
+    routing_tweaked = os.path.join(d, "overrides_tweaked.py")
+    routing = os.path.join(TOOL_ROOT, "tools", "recomp_overrides.py")
+    with open(routing, "rb") as f:
+        body = f.read()
+    with open(routing_tweaked, "wb") as f:
+        f.write(body + b"\n# a routing change\n")
+    baseline = emitted_fingerprint(RECOMP, root, "Game.exe", routing)
+    changed = emitted_fingerprint(RECOMP, root, "Game.exe", routing_tweaked)
+    if baseline == changed:
+        ok = False
+        print("  FAIL  editing override routing did not change the fingerprint")
+    else:
+        print("  pass  editing override routing changes the fingerprint")
+
+    # And the fingerprint must MOVE when the PORT's authoritative override set
+    # changes. This is independent of recomp.py's bytes, and was the missing
+    # input that let stale direct calls bypass newly registered overrides.
+    before = fingerprint(root=root, program="Game.exe")
+    with open(os.path.join(root, "src", "native", "more.c"), "w") as f:
+        f.write('x86_register_override("Game.exe", 0x00402000, g);\n')
+    after = fingerprint(root=root, program="Game.exe")
+    if before == after:
+        ok = False
+        print("  FAIL  changing the override set did not change the fingerprint")
+    else:
+        print("  pass  changing the override set changes the fingerprint")
+
+    # A registration for another module cannot alter this module's generated
+    # calls. Per-module stamps keep one override addition from forcing every
+    # unrelated DLL in a large port to re-emit.
+    before = fingerprint(root=root, program="Game.exe")
+    with open(os.path.join(root, "src", "native", "other.c"), "w") as f:
+        f.write('x86_register_override("Other.dll", 0x10001000, h);\n')
+    after = fingerprint(root=root, program="Game.exe")
+    if before != after:
+        ok = False
+        print("  FAIL  another module's override changed this fingerprint")
+    else:
+        print("  pass  another module's override leaves this fingerprint alone")
+
+    import shutil
+    shutil.rmtree(d)
     print("\nSELFTEST", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 

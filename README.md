@@ -42,10 +42,14 @@ logged defect.
 - **Every stage refuses rather than producing something smaller that looks like
   progress**: a missing JSON, a zero-function export, an export whose block
   layout disagrees with the shipped PE.
-- **The generated C carries the translator's content hash.** It is gitignored,
-  so nothing tracked would otherwise show that it had fallen behind — and a
-  stale module builds, links, runs, and is wrong in exactly the way the fix it
-  missed was about to correct.
+- **The generated C carries an emitted-input content hash.** It covers the
+  translator, the override-routing scanner, and that module's authoritative
+  `(module, entry-point)` native override set: adding an override rewrites
+  direct callers through `DISPATCH` even when `recomp.py` itself did not
+  change, without making unrelated DLLs stale. Generated C is gitignored, so
+  nothing tracked would otherwise show that it had fallen behind — and a stale
+  module builds, links, runs, and is wrong in exactly the way the fix it missed
+  was about to correct.
 
 ## It resolves the PORT from the working directory
 

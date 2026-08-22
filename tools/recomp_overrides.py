@@ -13,6 +13,7 @@ stale copy with a STALE translator stamp. That is how a no-isolate re-emit left
 the isolated-function chunks of an isolate emit behind (see the emit command).
 """
 
+import hashlib
 import os
 import re
 
@@ -82,6 +83,34 @@ def overrides_for_module(root, program, known_eps):
     return mine
 
 
+def emitted_fingerprint(translator_path, root, program, routing_path=__file__):
+    """Hash every input that changes override routing in emitted C.
+
+    Native implementation edits do not require a re-emit, but adding or
+    removing a (module, entry-point) registration does: direct calls to that
+    entry point change between a plain C call and DISPATCH. Paths and line
+    numbers are intentionally excluded because moving the same registration
+    within src/native does not change generated semantics.
+    """
+    stem = program.rsplit(".", 1)[0].lower()
+    registrations = sorted({(module, ep)
+                            for module, ep, _, _ in scan_overrides(root)
+                            if module.rsplit(".", 1)[0].lower() == stem})
+    digest = hashlib.sha256()
+    with open(translator_path, "rb") as source:
+        digest.update(source.read())
+    digest.update(b"\0override-router-v1\0")
+    with open(routing_path, "rb") as source:
+        digest.update(source.read())
+    digest.update(b"\0native-overrides-v1\0")
+    for module, ep in registrations:
+        digest.update(module.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(("%08x" % ep).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
 def remove_orphan_chunks(stem, nchunk):
     """Delete chunk files an earlier emit wrote past this emit's count.
 
@@ -132,6 +161,32 @@ def _selftest():
                        "module that has that address"))
     except SystemExit as e:
         checks.append(("bare address with no module", True, str(e)))
+    shutil.rmtree(d)
+
+    # The emitted stamp must move when the authoritative registration SET
+    # changes. Before this check existed, check_emitted declared generated C
+    # current after a new override was added even though its direct callers
+    # still bypassed the runtime override slot.
+    d = tree('x86_register_override("XMen2.exe", 0x00617480, f);\n')
+    baseline = emitted_fingerprint(__file__, d, "XMen2.exe")
+    with open(os.path.join(d, "src", "native", "t.c"), "a") as f:
+        f.write('x86_register_override("XMen2.exe", 0x005604f0, g);\n')
+    changed = emitted_fingerprint(__file__, d, "XMen2.exe")
+    ok = baseline != changed
+    checks.append(("override-set fingerprint changes", ok,
+                   "%s -> %s" % (baseline, changed)))
+    shutil.rmtree(d)
+
+    # Moving the same set between native files is not an emitted-code change;
+    # including paths/lines would create false staleness and needless re-emits.
+    d = tree('x86_register_override("XMen2.exe", 0x00617480, f);\n')
+    baseline = emitted_fingerprint(__file__, d, "XMen2.exe")
+    os.rename(os.path.join(d, "src", "native", "t.c"),
+              os.path.join(d, "src", "native", "moved.c"))
+    moved = emitted_fingerprint(__file__, d, "XMen2.exe")
+    ok = baseline == moved
+    checks.append(("same set moved between files", ok,
+                   "%s -> %s" % (baseline, moved)))
     shutil.rmtree(d)
 
     # REJECT: a registration naming a module at an entry point it does not
